@@ -16,49 +16,54 @@
  */
 
 #include "TotpExportSettingsDialog.h"
-#include "core/Config.h"
-#include "core/Entry.h"
+
+#include "core/Totp.h"
 #include "gui/Clipboard.h"
-#include "gui/DatabaseWidget.h"
+#include "gui/MainWindow.h"
 #include "gui/SquareSvgWidget.h"
 #include "qrcode/QrCode.h"
-#include "totp/totp.h"
 
+#include <QBoxLayout>
 #include <QBuffer>
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QSizePolicy>
-#include <QVBoxLayout>
+#include <QShortcut>
+#include <QStackedWidget>
 
 TotpExportSettingsDialog::TotpExportSettingsDialog(DatabaseWidget* parent, Entry* entry)
     : QDialog(parent)
     , m_timer(new QTimer(this))
     , m_verticalLayout(new QVBoxLayout())
-    , m_totpSvgWidget(new SquareSvgWidget())
+    , m_totpSvgContainerWidget(new QStackedWidget())
+    , m_totpSvgWidget(new SquareSvgWidget(m_totpSvgContainerWidget))
     , m_countDown(new QLabel())
     , m_warningLabel(new QLabel())
     , m_buttonBox(new QDialogButtonBox(QDialogButtonBox::Close | QDialogButtonBox::Ok))
 {
+    setObjectName("entryQrCodeWidget");
+    m_totpSvgContainerWidget->addWidget(m_totpSvgWidget);
+
     m_verticalLayout->addWidget(m_warningLabel);
     m_verticalLayout->addItem(new QSpacerItem(0, 0));
-
-    m_verticalLayout->addStretch(0);
-    m_verticalLayout->addWidget(m_totpSvgWidget);
-    m_verticalLayout->addStretch(0);
+    m_verticalLayout->addWidget(m_totpSvgContainerWidget);
     m_verticalLayout->addWidget(m_countDown);
     m_verticalLayout->addWidget(m_buttonBox);
+
+    m_verticalLayout->setAlignment(m_buttonBox, Qt::AlignBottom);
 
     setLayout(m_verticalLayout);
     setAttribute(Qt::WA_DeleteOnClose);
 
     connect(m_buttonBox, SIGNAL(rejected()), SLOT(close()));
     connect(m_buttonBox, SIGNAL(accepted()), SLOT(copyToClipboard()));
-    connect(m_timer, SIGNAL(timeout()), this, SLOT(autoClose()));
-    connect(parent, SIGNAL(lockedDatabase()), this, SLOT(close()));
+    connect(m_timer, SIGNAL(timeout()), SLOT(autoClose()));
+
+    new QShortcut(QKeySequence(QKeySequence::Copy), this, SLOT(copyToClipboard()));
 
     m_buttonBox->button(QDialogButtonBox::Ok)->setText(tr("Copy"));
+    m_buttonBox->setFocus();
     m_countDown->setAlignment(Qt::AlignCenter);
 
     m_secTillClose = 45;
@@ -66,7 +71,7 @@ TotpExportSettingsDialog::TotpExportSettingsDialog(DatabaseWidget* parent, Entry
     m_timer->start(1000);
 
     const auto totpSettings = entry->totpSettings();
-    if (totpSettings->custom || !totpSettings->encoder.shortName.isEmpty()) {
+    if (Totp::hasCustomSettings(totpSettings) || !totpSettings->encoder.shortName.isEmpty()) {
         m_warningLabel->setWordWrap(true);
         m_warningLabel->setMargin(5);
         m_warningLabel->setText(tr("NOTE: These TOTP settings are custom and may not work with other authenticators.",
@@ -82,7 +87,7 @@ TotpExportSettingsDialog::TotpExportSettingsDialog(DatabaseWidget* parent, Entry
         QBuffer buffer;
         qrc.writeSvg(&buffer, logicalDpiX());
         m_totpSvgWidget->load(buffer.data());
-        const int minsize = static_cast<int>(logicalDpiX() * 2.5);
+        const auto minsize = static_cast<int>(logicalDpiX() * 2.5);
         m_totpSvgWidget->setMinimumSize(minsize, minsize);
     } else {
         auto errorBox = new QMessageBox(parent);
@@ -92,18 +97,16 @@ TotpExportSettingsDialog::TotpExportSettingsDialog(DatabaseWidget* parent, Entry
         errorBox->exec();
         close();
     }
-
-    show();
 }
 
 void TotpExportSettingsDialog::copyToClipboard()
 {
     clipboard()->setText(m_totpUri);
-    if (config()->get("HideWindowOnCopy").toBool()) {
-        if (config()->get("MinimizeOnCopy").toBool()) {
-            static_cast<DatabaseWidget*>(parent())->window()->showMinimized();
-        } else if (config()->get("DropToBackgroundOnCopy").toBool()) {
-            static_cast<DatabaseWidget*>(parent())->window()->lower();
+    if (config()->get(Config::HideWindowOnCopy).toBool()) {
+        if (config()->get(Config::MinimizeOnCopy).toBool()) {
+            getMainWindow()->minimizeOrHide();
+        } else if (config()->get(Config::DropToBackgroundOnCopy).toBool()) {
+            getMainWindow()->lower();
             window()->lower();
         }
     }

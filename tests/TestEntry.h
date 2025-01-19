@@ -36,8 +36,12 @@ private slots:
     void testResolveRecursivePlaceholders();
     void testResolveReferencePlaceholders();
     void testResolveNonIdPlaceholdersToUuid();
+    void testResolveConversionPlaceholders();
+    void testResolveReplacePlaceholders();
     void testResolveClonedEntry();
     void testIsRecycled();
+    void testMoveUpDown();
+    void testPreviousParentGroup();
 };
 
 #endif // KEEPASSX_TESTENTRY_H

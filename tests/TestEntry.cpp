@@ -16,12 +16,13 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QScopedPointer>
+#include <QTest>
 
 #include "TestEntry.h"
-#include "TestGlobal.h"
 #include "core/Clock.h"
+#include "core/Group.h"
 #include "core/Metadata.h"
+#include "core/TimeInfo.h"
 #include "crypto/Crypto.h"
 
 QTEST_GUILESS_MAIN(TestEntry)
@@ -85,6 +86,7 @@ void TestEntry::testClone()
 {
     QScopedPointer<Entry> entryOrg(new Entry());
     entryOrg->setUuid(QUuid::createUuid());
+    entryOrg->setPassword("pass");
     entryOrg->setTitle("Original Title");
     entryOrg->beginUpdate();
     entryOrg->setTitle("New Title");
@@ -107,18 +109,43 @@ void TestEntry::testClone()
     QCOMPARE(entryCloneNewUuid->historyItems().size(), 0);
     QCOMPARE(entryCloneNewUuid->timeInfo().creationTime(), entryOrg->timeInfo().creationTime());
 
+    // Reset modification time
+    entryOrgTime.setLastModificationTime(Clock::datetimeUtc(60));
+    entryOrg->setTimeInfo(entryOrgTime);
+
+    QScopedPointer<Entry> entryCloneRename(entryOrg->clone(Entry::CloneRenameTitle));
+    QCOMPARE(entryCloneRename->uuid(), entryOrg->uuid());
+    QCOMPARE(entryCloneRename->title(), QString("New Title - Clone"));
+    // Cloning should not modify time info unless explicitly requested
+    QCOMPARE(entryCloneRename->timeInfo(), entryOrg->timeInfo());
+
     QScopedPointer<Entry> entryCloneResetTime(entryOrg->clone(Entry::CloneResetTimeInfo));
     QCOMPARE(entryCloneResetTime->uuid(), entryOrg->uuid());
     QCOMPARE(entryCloneResetTime->title(), QString("New Title"));
     QCOMPARE(entryCloneResetTime->historyItems().size(), 0);
     QVERIFY(entryCloneResetTime->timeInfo().creationTime() != entryOrg->timeInfo().creationTime());
 
-    QScopedPointer<Entry> entryCloneHistory(entryOrg->clone(Entry::CloneIncludeHistory));
+    // Date back history of original entry
+    Entry* firstHistoryItem = entryOrg->historyItems()[0];
+    TimeInfo entryOrgHistoryTimeInfo = firstHistoryItem->timeInfo();
+    QDateTime datedBackEntryOrgModificationTime = entryOrgHistoryTimeInfo.lastModificationTime().addMSecs(-10);
+    entryOrgHistoryTimeInfo.setLastModificationTime(datedBackEntryOrgModificationTime);
+    entryOrgHistoryTimeInfo.setCreationTime(datedBackEntryOrgModificationTime);
+    firstHistoryItem->setTimeInfo(entryOrgHistoryTimeInfo);
+
+    QScopedPointer<Entry> entryCloneHistory(entryOrg->clone(Entry::CloneIncludeHistory | Entry::CloneResetTimeInfo));
     QCOMPARE(entryCloneHistory->uuid(), entryOrg->uuid());
     QCOMPARE(entryCloneHistory->title(), QString("New Title"));
-    QCOMPARE(entryCloneHistory->historyItems().size(), 1);
+    QCOMPARE(entryCloneHistory->historyItems().size(), entryOrg->historyItems().size());
     QCOMPARE(entryCloneHistory->historyItems().at(0)->title(), QString("Original Title"));
-    QCOMPARE(entryCloneHistory->timeInfo().creationTime(), entryOrg->timeInfo().creationTime());
+    QVERIFY(entryCloneHistory->timeInfo().creationTime() != entryOrg->timeInfo().creationTime());
+    // Timeinfo of history items should not be modified
+    QList<Entry*> entryOrgHistory = entryOrg->historyItems(), clonedHistory = entryCloneHistory->historyItems();
+    auto entryOrgHistoryItem = entryOrgHistory.constBegin();
+    for (auto entryCloneHistoryItem = clonedHistory.constBegin(); entryCloneHistoryItem != clonedHistory.constEnd();
+         ++entryCloneHistoryItem, ++entryOrgHistoryItem) {
+        QCOMPARE((*entryOrgHistoryItem)->timeInfo(), (*entryCloneHistoryItem)->timeInfo());
+    }
 
     Database db;
     auto* entryOrgClone = entryOrg->clone(Entry::CloneNoFlags);
@@ -294,10 +321,12 @@ void TestEntry::testResolveRecursivePlaceholders()
     entry7->setTitle(QString("{REF:T@I:%1} and something else").arg(entry3->uuidToHex()));
     entry7->setUsername(QString("{TITLE}"));
     entry7->setPassword(QString("PASSWORD"));
+    entry7->setNotes(QString("{lots} {of} {braces}"));
 
     QCOMPARE(entry7->resolvePlaceholder(entry7->title()), QString("Entry2Title and something else"));
     QCOMPARE(entry7->resolvePlaceholder(entry7->username()), QString("Entry2Title and something else"));
     QCOMPARE(entry7->resolvePlaceholder(entry7->password()), QString("PASSWORD"));
+    QCOMPARE(entry7->resolvePlaceholder(entry7->notes()), QString("{lots} {of} {braces}"));
 }
 
 void TestEntry::testResolveReferencePlaceholders()
@@ -485,6 +514,86 @@ void TestEntry::testResolveNonIdPlaceholdersToUuid()
     }
 }
 
+void TestEntry::testResolveConversionPlaceholders()
+{
+    Database db;
+    auto* root = db.rootGroup();
+
+    auto* entry1 = new Entry();
+    entry1->setGroup(root);
+    entry1->setUuid(QUuid::createUuid());
+    entry1->setTitle("Title1 {T-CONV:/{USERNAME}/lower/} {T-CONV:/{PASSWORD}/upper/}");
+    entry1->setUsername("Username1");
+    entry1->setPassword("Password1");
+    entry1->setUrl("https://example.com/?test=3423&h=sdsds");
+
+    auto* entry2 = new Entry();
+    entry2->setGroup(root);
+    entry2->setUuid(QUuid::createUuid());
+    entry2->setTitle("Title2");
+    entry2->setUsername(QString("{T-CONV:/{REF:U@I:%1}/UPPER/}").arg(entry1->uuidToHex()));
+    entry2->setPassword(QString("{REF:P@I:%1}").arg(entry1->uuidToHex()));
+    entry2->setUrl("cmd://ssh {USERNAME}@server.com -p {PASSWORD}");
+
+    // Test complicated and nested conversions
+    QCOMPARE(entry1->resolveMultiplePlaceholders(entry1->title()), QString("Title1 username1 PASSWORD1"));
+    QCOMPARE(entry2->resolveMultiplePlaceholders(entry2->url()),
+             QString("cmd://ssh USERNAME1@server.com -p Password1"));
+    // Test base64 and hex conversions
+    QCOMPARE(entry1->resolveMultiplePlaceholders("{T-CONV:/{PASSWORD}/base64/}"), QString("UGFzc3dvcmQx"));
+    QCOMPARE(entry1->resolveMultiplePlaceholders("{T-CONV:/{PASSWORD}/hex/}"), QString("50617373776f726431"));
+    // Test URL encode and decode
+    auto encodedURL = entry1->resolveMultiplePlaceholders("{T-CONV:/{URL}/uri/}");
+    QCOMPARE(encodedURL, QString("https%3A%2F%2Fexample.com%2F%3Ftest%3D3423%26h%3Dsdsds"));
+    QCOMPARE(entry1->resolveMultiplePlaceholders(
+                 "{T-CONV:/https%3A%2F%2Fexample.com%2F%3Ftest%3D3423%26h%3Dsdsds/uri-dec/}"),
+             entry1->url());
+    // Test invalid syntax
+    QString error;
+    entry1->resolveConversionPlaceholder("{T-CONV:/{USERNAME}/junk/}", &error);
+    QVERIFY(!error.isEmpty());
+    entry1->resolveConversionPlaceholder("{T-CONV:}", &error);
+    QVERIFY(!error.isEmpty());
+    // Check that error gets cleared
+    entry1->resolveConversionPlaceholder("{T-CONV:/a/upper/}", &error);
+    QVERIFY(error.isEmpty());
+}
+
+void TestEntry::testResolveReplacePlaceholders()
+{
+    Database db;
+    auto* root = db.rootGroup();
+
+    auto* entry1 = new Entry();
+    entry1->setGroup(root);
+    entry1->setUuid(QUuid::createUuid());
+    entry1->setTitle("Title1");
+    entry1->setUsername("Username1");
+    entry1->setPassword("Password1");
+
+    auto* entry2 = new Entry();
+    entry2->setGroup(root);
+    entry2->setUuid(QUuid::createUuid());
+    entry2->setTitle("SAP server1 12345");
+    entry2->setUsername(QString("{T-REPLACE-RX:/{REF:U@I:%1}/\\d$/2/}").arg(entry1->uuidToHex()));
+    entry2->setPassword(QString("{REF:P@I:%1}").arg(entry1->uuidToHex()));
+    entry2->setUrl(
+        R"(cmd://sap.exe -system={T-REPLACE-RX:/{Title}/(?i)^(.* )?(\w+(?=(\s* \d+$)))\3/$2/} -client={T-REPLACE-RX:/{Title}/(?i)^.* (?=\d+$)//} -user={USERNAME} -pw={PASSWORD})");
+
+    // Test complicated and nested replacements
+    QCOMPARE(entry2->resolveMultiplePlaceholders(entry2->url()),
+             QString("cmd://sap.exe -system=server1 -client=12345 -user=Username2 -pw=Password1"));
+    // Test invalid syntax
+    QString error;
+    entry1->resolveRegexPlaceholder("{T-REPLACE-RX:/{USERNAME}/.*+?/test/}", &error); // invalid regex
+    QVERIFY(!error.isEmpty());
+    entry1->resolveRegexPlaceholder("{T-REPLACE-RX:/{USERNAME}/.*/}", &error); // no replacement
+    QVERIFY(!error.isEmpty());
+    // Check that error gets cleared
+    entry1->resolveRegexPlaceholder("{T-REPLACE-RX:/{USERNAME}/\\d/2/}", &error);
+    QVERIFY(error.isEmpty());
+}
+
 void TestEntry::testResolveClonedEntry()
 {
     Database db;
@@ -565,7 +674,7 @@ void TestEntry::testResolveClonedEntry()
 
 void TestEntry::testIsRecycled()
 {
-    Entry* entry = new Entry();
+    auto entry = new Entry();
     QVERIFY(!entry->isRecycled());
 
     Database db;
@@ -578,12 +687,167 @@ void TestEntry::testIsRecycled()
     db.recycleEntry(entry);
     QVERIFY(entry->isRecycled());
 
-    Group* group1 = new Group();
+    auto group1 = new Group();
     group1->setParent(root);
 
-    Entry* entry1 = new Entry();
+    auto entry1 = new Entry();
     entry1->setGroup(group1);
     QVERIFY(!entry1->isRecycled());
     db.recycleGroup(group1);
     QVERIFY(entry1->isRecycled());
+}
+
+void TestEntry::testMoveUpDown()
+{
+    Database db;
+    Group* root = db.rootGroup();
+    QVERIFY(root);
+
+    auto entry0 = new Entry();
+    QVERIFY(entry0);
+    entry0->setGroup(root);
+    auto entry1 = new Entry();
+    QVERIFY(entry1);
+    entry1->setGroup(root);
+    auto entry2 = new Entry();
+    QVERIFY(entry2);
+    entry2->setGroup(root);
+    auto entry3 = new Entry();
+    QVERIFY(entry3);
+    entry3->setGroup(root);
+    // default order, straight
+    QCOMPARE(root->entries().at(0), entry0);
+    QCOMPARE(root->entries().at(1), entry1);
+    QCOMPARE(root->entries().at(2), entry2);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry0->moveDown();
+    QCOMPARE(root->entries().at(0), entry1);
+    QCOMPARE(root->entries().at(1), entry0);
+    QCOMPARE(root->entries().at(2), entry2);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry0->moveDown();
+    QCOMPARE(root->entries().at(0), entry1);
+    QCOMPARE(root->entries().at(1), entry2);
+    QCOMPARE(root->entries().at(2), entry0);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry0->moveDown();
+    QCOMPARE(root->entries().at(0), entry1);
+    QCOMPARE(root->entries().at(1), entry2);
+    QCOMPARE(root->entries().at(2), entry3);
+    QCOMPARE(root->entries().at(3), entry0);
+
+    // no effect
+    entry0->moveDown();
+    QCOMPARE(root->entries().at(0), entry1);
+    QCOMPARE(root->entries().at(1), entry2);
+    QCOMPARE(root->entries().at(2), entry3);
+    QCOMPARE(root->entries().at(3), entry0);
+
+    entry0->moveUp();
+    QCOMPARE(root->entries().at(0), entry1);
+    QCOMPARE(root->entries().at(1), entry2);
+    QCOMPARE(root->entries().at(2), entry0);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry0->moveUp();
+    QCOMPARE(root->entries().at(0), entry1);
+    QCOMPARE(root->entries().at(1), entry0);
+    QCOMPARE(root->entries().at(2), entry2);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry0->moveUp();
+    QCOMPARE(root->entries().at(0), entry0);
+    QCOMPARE(root->entries().at(1), entry1);
+    QCOMPARE(root->entries().at(2), entry2);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    // no effect
+    entry0->moveUp();
+    QCOMPARE(root->entries().at(0), entry0);
+    QCOMPARE(root->entries().at(1), entry1);
+    QCOMPARE(root->entries().at(2), entry2);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry2->moveUp();
+    QCOMPARE(root->entries().at(0), entry0);
+    QCOMPARE(root->entries().at(1), entry2);
+    QCOMPARE(root->entries().at(2), entry1);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry0->moveDown();
+    QCOMPARE(root->entries().at(0), entry2);
+    QCOMPARE(root->entries().at(1), entry0);
+    QCOMPARE(root->entries().at(2), entry1);
+    QCOMPARE(root->entries().at(3), entry3);
+
+    entry3->moveUp();
+    QCOMPARE(root->entries().at(0), entry2);
+    QCOMPARE(root->entries().at(1), entry0);
+    QCOMPARE(root->entries().at(2), entry3);
+    QCOMPARE(root->entries().at(3), entry1);
+
+    entry3->moveUp();
+    QCOMPARE(root->entries().at(0), entry2);
+    QCOMPARE(root->entries().at(1), entry3);
+    QCOMPARE(root->entries().at(2), entry0);
+    QCOMPARE(root->entries().at(3), entry1);
+
+    entry2->moveDown();
+    QCOMPARE(root->entries().at(0), entry3);
+    QCOMPARE(root->entries().at(1), entry2);
+    QCOMPARE(root->entries().at(2), entry0);
+    QCOMPARE(root->entries().at(3), entry1);
+
+    entry1->moveUp();
+    QCOMPARE(root->entries().at(0), entry3);
+    QCOMPARE(root->entries().at(1), entry2);
+    QCOMPARE(root->entries().at(2), entry1);
+    QCOMPARE(root->entries().at(3), entry0);
+}
+
+void TestEntry::testPreviousParentGroup()
+{
+    Database db;
+    auto* root = db.rootGroup();
+    root->setUuid(QUuid::createUuid());
+    QVERIFY(!root->uuid().isNull());
+
+    auto* group1 = new Group();
+    group1->setUuid(QUuid::createUuid());
+    group1->setParent(root);
+    QVERIFY(!group1->uuid().isNull());
+
+    auto* group2 = new Group();
+    group2->setParent(root);
+    group2->setUuid(QUuid::createUuid());
+    QVERIFY(!group2->uuid().isNull());
+
+    auto* entry = new Entry();
+    QVERIFY(entry);
+    QVERIFY(entry->previousParentGroupUuid().isNull());
+    QVERIFY(!entry->previousParentGroup());
+
+    entry->setGroup(root);
+    QVERIFY(entry->previousParentGroupUuid().isNull());
+    QVERIFY(!entry->previousParentGroup());
+
+    // Previous parent shouldn't be recorded if new and old parent are the same
+    entry->setGroup(root);
+    QVERIFY(entry->previousParentGroupUuid().isNull());
+    QVERIFY(!entry->previousParentGroup());
+
+    entry->setGroup(group1);
+    QVERIFY(entry->previousParentGroupUuid() == root->uuid());
+    QVERIFY(entry->previousParentGroup() == root);
+
+    entry->setGroup(group2);
+    QVERIFY(entry->previousParentGroupUuid() == group1->uuid());
+    QVERIFY(entry->previousParentGroup() == group1);
+
+    entry->setGroup(group2);
+    QVERIFY(entry->previousParentGroupUuid() == group1->uuid());
+    QVERIFY(entry->previousParentGroup() == group1);
 }

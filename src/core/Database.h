@@ -21,20 +21,22 @@
 
 #include <QDateTime>
 #include <QHash>
-#include <QObject>
+#include <QMutex>
 #include <QPointer>
+#include <QTimer>
 
 #include "config-keepassx.h"
+#include "core/ModifiableObject.h"
 #include "crypto/kdf/AesKdf.h"
-#include "crypto/kdf/Kdf.h"
 #include "format/KeePass2.h"
 #include "keys/CompositeKey.h"
+#include "keys/PasswordKey.h"
 
 class Entry;
 enum class EntryReferenceType;
+class FileWatcher;
 class Group;
 class Metadata;
-class QTimer;
 class QIODevice;
 
 struct DeletedObject
@@ -49,7 +51,7 @@ struct DeletedObject
 
 Q_DECLARE_TYPEINFO(DeletedObject, Q_MOVABLE_TYPE);
 
-class Database : public QObject
+class Database : public ModifiableObject
 {
     Q_OBJECT
 
@@ -61,36 +63,63 @@ public:
     };
     static const quint32 CompressionAlgorithmMax = CompressionGZip;
 
+    enum SaveAction
+    {
+        Atomic, // Saves are transactional and atomic
+        TempFile, // Write to a temporary location then move into place, may be non-atomic
+        DirectWrite, // Directly write to the destination file (dangerous)
+    };
+
     Database();
     explicit Database(const QString& filePath);
     ~Database() override;
 
-    bool open(QSharedPointer<const CompositeKey> key, QString* error = nullptr, bool readOnly = false);
-    bool open(const QString& filePath,
-              QSharedPointer<const CompositeKey> key,
-              QString* error = nullptr,
-              bool readOnly = false);
-    bool save(QString* error = nullptr, bool atomic = true, bool backup = false);
-    bool save(const QString& filePath, QString* error = nullptr, bool atomic = true, bool backup = false);
+private:
+    bool writeDatabase(QIODevice* device, QString* error = nullptr);
+    bool backupDatabase(const QString& filePath, const QString& destinationFilePath);
+    bool restoreDatabase(const QString& filePath, const QString& fromBackupFilePath);
+    bool performSave(const QString& filePath, SaveAction flags, const QString& backupFilePath, QString* error);
+
+public:
+    bool open(QSharedPointer<const CompositeKey> key, QString* error = nullptr);
+    bool open(const QString& filePath, QSharedPointer<const CompositeKey> key, QString* error = nullptr);
+    bool save(SaveAction action = Atomic, const QString& backupFilePath = QString(), QString* error = nullptr);
+    bool saveAs(const QString& filePath,
+                SaveAction action = Atomic,
+                const QString& backupFilePath = QString(),
+                QString* error = nullptr);
     bool extract(QByteArray&, QString* error = nullptr);
+    bool import(const QString& xmlExportPath, QString* error = nullptr);
+
+    quint32 formatVersion() const;
+    void setFormatVersion(quint32 version);
+    bool hasMinorVersionMismatch() const;
+
+    void releaseData();
 
     bool isInitialized() const;
-    void setInitialized(bool initialized);
     bool isModified() const;
-    void setEmitModified(bool value);
-    bool isReadOnly() const;
-    void setReadOnly(bool readOnly);
+    bool hasNonDataChanges() const;
+    bool isSaving();
 
+    QUuid publicUuid();
     QUuid uuid() const;
     QString filePath() const;
     QString canonicalFilePath() const;
     void setFilePath(const QString& filePath);
 
+    QString publicName();
+    void setPublicName(const QString& name);
+    QString publicColor();
+    void setPublicColor(const QString& color);
+    int publicIcon();
+    void setPublicIcon(int iconIndex);
+
     Metadata* metadata();
     const Metadata* metadata() const;
     Group* rootGroup();
     const Group* rootGroup() const;
-    void setRootGroup(Group* group);
+    Q_REQUIRED_RESULT Group* setRootGroup(Group* group);
     QVariantMap& publicCustomData();
     const QVariantMap& publicCustomData() const;
     void setPublicCustomData(const QVariantMap& customData);
@@ -106,17 +135,18 @@ public:
     bool containsDeletedObject(const DeletedObject& uuid) const;
     void setDeletedObjects(const QList<DeletedObject>& delObjs);
 
-    QList<QString> commonUsernames();
+    const QStringList& commonUsernames() const;
+    const QStringList& tagList() const;
+    void removeTag(const QString& tag);
 
-    bool hasKey() const;
     QSharedPointer<const CompositeKey> key() const;
     bool setKey(const QSharedPointer<const CompositeKey>& key,
                 bool updateChangedTime = true,
                 bool updateTransformSalt = false,
                 bool transformKey = true);
+    QString keyError();
     QByteArray challengeResponseKey() const;
     bool challengeMasterSeed(const QByteArray& masterSeed);
-    bool verifyKey(const QSharedPointer<CompositeKey>& key) const;
     const QUuid& cipher() const;
     void setCipher(const QUuid& cipher);
     Database::CompressionAlgorithm compressionAlgorithm() const;
@@ -125,15 +155,19 @@ public:
     QSharedPointer<Kdf> kdf() const;
     void setKdf(QSharedPointer<Kdf> kdf);
     bool changeKdf(const QSharedPointer<Kdf>& kdf);
-    QByteArray transformedMasterKey() const;
+    QByteArray transformedDatabaseKey() const;
+
+    void markAsTemporaryDatabase();
+    bool isTemporaryDatabase();
 
     static Database* databaseByUuid(const QUuid& uuid);
-    static Database* databaseByFilePath(const QString& filePath);
 
 public slots:
     void markAsModified();
     void markAsClean();
     void updateCommonUsernames(int topN = 10);
+    void updateTagList();
+    void markNonDataChange();
 
 signals:
     void filePathChanged(const QString& oldPath, const QString& newPath);
@@ -144,54 +178,78 @@ signals:
     void groupRemoved();
     void groupAboutToMove(Group* group, Group* toGroup, int index);
     void groupMoved();
-    void databaseModified();
+    void databaseOpened();
     void databaseSaved();
     void databaseDiscarded();
-
-private slots:
-    void startModifiedTimer();
+    void databaseFileChanged();
+    void databaseNonDataChanged();
+    void tagListUpdated();
 
 private:
     struct DatabaseData
     {
+        quint32 formatVersion = 0;
         QString filePath;
-        bool isReadOnly = false;
         QUuid cipher = KeePass2::CIPHER_AES256;
         CompressionAlgorithm compressionAlgorithm = CompressionGZip;
-        QByteArray transformedMasterKey;
-        QSharedPointer<Kdf> kdf = QSharedPointer<AesKdf>::create(true);
+
+        QScopedPointer<PasswordKey> masterSeed;
+        QScopedPointer<PasswordKey> transformedDatabaseKey;
+        QScopedPointer<PasswordKey> challengeResponseKey;
+
         QSharedPointer<const CompositeKey> key;
-        bool hasKey = false;
-        QByteArray masterSeed;
-        QByteArray challengeResponseKey;
+        QSharedPointer<Kdf> kdf;
+
         QVariantMap publicCustomData;
 
         DatabaseData()
         {
+            clear();
+        }
+
+        void clear()
+        {
+            resetKeys();
+            filePath.clear();
+            publicCustomData.clear();
+        }
+
+        void resetKeys()
+        {
+            masterSeed.reset(new PasswordKey());
+            transformedDatabaseKey.reset(new PasswordKey());
+            challengeResponseKey.reset(new PasswordKey());
+
+            key.reset();
+
+            // Default to AES KDF, KDBX4 databases overwrite this
+            kdf.reset(new AesKdf(true));
             kdf->randomizeSeed();
         }
     };
 
     void createRecycleBin();
 
-    bool writeDatabase(QIODevice* device, QString* error = nullptr);
-    bool backupDatabase(const QString& filePath);
-    bool restoreDatabase(const QString& filePath);
+    void startModifiedTimer();
+    void stopModifiedTimer();
 
-    Metadata* const m_metadata;
+    QPointer<Metadata> const m_metadata;
     DatabaseData m_data;
-    Group* m_rootGroup;
+    QPointer<Group> m_rootGroup;
     QList<DeletedObject> m_deletedObjects;
-    QPointer<QTimer> m_timer;
-    bool m_initialized = false;
+    QTimer m_modifiedTimer;
+    QMutex m_saveMutex;
+    QPointer<FileWatcher> m_fileWatcher;
     bool m_modified = false;
-    bool m_emitModified;
+    bool m_hasNonDataChange = false;
+    QString m_keyError;
+    bool m_isTemporaryDatabase = false;
 
-    QList<QString> m_commonUsernames;
+    QStringList m_commonUsernames;
+    QStringList m_tagList;
 
     QUuid m_uuid;
     static QHash<QUuid, QPointer<Database>> s_uuidMap;
-    static QHash<QString, QPointer<Database>> s_filePathMap;
 };
 
 #endif // KEEPASSX_DATABASE_H

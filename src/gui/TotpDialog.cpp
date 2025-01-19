@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2017 Weslly Honorato <﻿weslly@protonmail.com>
+ *  Copyright (C) 2017 Weslly Honorato <weslly@protonmail.com>
  *  Copyright (C) 2017 KeePassXC Team <team@keepassxc.org>
  *
  *  This program is free software: you can redistribute it and/or modify
@@ -20,18 +20,19 @@
 #include "ui_TotpDialog.h"
 
 #include "core/Clock.h"
-#include "core/Config.h"
+#include "core/Totp.h"
 #include "gui/Clipboard.h"
+#include "gui/MainWindow.h"
+
+#include <QPushButton>
+#include <QShortcut>
 
 TotpDialog::TotpDialog(QWidget* parent, Entry* entry)
     : QDialog(parent)
     , m_ui(new Ui::TotpDialog())
     , m_entry(entry)
 {
-    if (!m_entry->hasTotp()) {
-        close();
-        return;
-    }
+    setAttribute(Qt::WA_DeleteOnClose);
 
     m_ui->setupUi(this);
 
@@ -44,7 +45,7 @@ TotpDialog::TotpDialog(QWidget* parent, Entry* entry)
     m_totpUpdateTimer.start(m_step * 10);
     updateTotp();
 
-    setAttribute(Qt::WA_DeleteOnClose);
+    new QShortcut(QKeySequence(QKeySequence::Copy), this, SLOT(copyToClipboard()));
 
     m_ui->buttonBox->button(QDialogButtonBox::Ok)->setText(tr("Copy"));
 
@@ -52,18 +53,16 @@ TotpDialog::TotpDialog(QWidget* parent, Entry* entry)
     connect(m_ui->buttonBox, SIGNAL(accepted()), SLOT(copyToClipboard()));
 }
 
-TotpDialog::~TotpDialog()
-{
-}
+TotpDialog::~TotpDialog() = default;
 
 void TotpDialog::copyToClipboard()
 {
     clipboard()->setText(m_entry->totp());
-    if (config()->get("HideWindowOnCopy").toBool()) {
-        if (config()->get("MinimizeOnCopy").toBool()) {
-            qobject_cast<DatabaseWidget*>(parent())->window()->showMinimized();
-        } else if (config()->get("DropToBackgroundOnCopy").toBool()) {
-            qobject_cast<DatabaseWidget*>(parent())->window()->lower();
+    if (config()->get(Config::HideWindowOnCopy).toBool()) {
+        if (config()->get(Config::MinimizeOnCopy).toBool()) {
+            getMainWindow()->minimizeOrHide();
+        } else if (config()->get(Config::DropToBackgroundOnCopy).toBool()) {
+            getMainWindow()->lower();
             window()->lower();
         }
     }

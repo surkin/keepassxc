@@ -1,6 +1,6 @@
 /*
  *  Copyright (C) 2014 Kyle Manna <kyle@kylemanna.com>
- *  Copyright (C) 2017 KeePassXC Team <team@keepassxc.org>
+ *  Copyright (C) 2017-2021 KeePassXC Team <team@keepassxc.org>
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -16,18 +16,9 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stdio.h>
-
-#include "core/Global.h"
-#include "crypto/Random.h"
-
 #include "YubiKey.h"
 
-YubiKey::YubiKey()
-    : m_yk_void(NULL)
-    , m_ykds_void(NULL)
-{
-}
+YubiKey::YubiKey() = default;
 
 YubiKey* YubiKey::m_instance(Q_NULLPTR);
 
@@ -40,38 +31,47 @@ YubiKey* YubiKey::instance()
     return m_instance;
 }
 
-bool YubiKey::init()
+bool YubiKey::isInitialized()
 {
     return false;
 }
 
-bool YubiKey::deinit()
+bool YubiKey::findValidKeys()
 {
     return false;
 }
 
-void YubiKey::detect()
+void YubiKey::findValidKeysAsync()
 {
 }
 
-bool YubiKey::getSerial(unsigned int& serial)
+YubiKey::KeyMap YubiKey::foundKeys()
 {
-    Q_UNUSED(serial);
-
-    return false;
+    return {};
 }
 
-QString YubiKey::getVendorName()
+int YubiKey::connectedKeys()
 {
-    return "YubiKeyStub";
+    return 0;
 }
 
-YubiKey::ChallengeResult YubiKey::challenge(int slot, bool mayBlock, const QByteArray& chal, QByteArray& resp)
+QString YubiKey::errorMessage()
+{
+    return {};
+}
+
+bool YubiKey::testChallenge(YubiKeySlot slot, bool* wouldBlock)
 {
     Q_UNUSED(slot);
-    Q_UNUSED(mayBlock);
+    Q_UNUSED(wouldBlock);
+    return false;
+}
+
+YubiKey::ChallengeResult YubiKey::challenge(YubiKeySlot slot, const QByteArray& chal, Botan::secure_vector<char>& resp)
+{
+    Q_UNUSED(slot);
     Q_UNUSED(chal);
     Q_UNUSED(resp);
 
-    return ERROR;
+    return YubiKey::ChallengeResult::YCR_ERROR;
 }

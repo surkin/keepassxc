@@ -18,6 +18,9 @@
 #include "DatabaseCommand.h"
 
 #include "Utils.h"
+#include "config-keepassx.h"
+
+#include <QCommandLineParser>
 
 DatabaseCommand::DatabaseCommand()
 {
@@ -52,9 +55,12 @@ int DatabaseCommand::execute(const QStringList& arguments)
         db = Utils::unlockDatabase(args.at(0),
                                    !parser->isSet(Command::NoPasswordOption),
                                    parser->value(Command::KeyFileOption),
+#ifdef WITH_XC_YUBIKEY
                                    parser->value(Command::YubiKeyOption),
-                                   parser->isSet(Command::QuietOption) ? Utils::DEVNULL : Utils::STDOUT,
-                                   Utils::STDERR);
+#else
+                                   "",
+#endif
+                                   parser->isSet(Command::QuietOption));
         if (!db) {
             return EXIT_FAILURE;
         }

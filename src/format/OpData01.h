@@ -22,11 +22,13 @@
 
 /*!
  * Packages and transports the AgileBits data structure called \c OpData01
- * used to encypt and provide HMAC for encrypted data.
+ * used to encrypt and provide HMAC for encrypted data.
  * \sa https://support.1password.com/opvault-design/#opdata01
  */
 class OpData01 : public QObject
 {
+    Q_OBJECT
+
 public:
     explicit OpData01(QObject* parent = nullptr);
     ~OpData01() override;
